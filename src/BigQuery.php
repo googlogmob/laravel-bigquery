@@ -8,7 +8,7 @@ use Google\Cloud\Core\ExponentialBackoff;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
-use Madewithlove\IlluminatePsrCacheBridge\Laravel\CacheItemPool;
+use googlogmob\BigQuery\Cache\CacheItemPool;
 
 /**
  * Class BigQuery.
