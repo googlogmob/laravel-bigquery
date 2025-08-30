@@ -1,14 +1,19 @@
 <?php
 
+declare(strict_types=1);
+
 namespace googlogmob\BigQuery;
 
-use Google\Cloud\BigQuery\BigQueryClient;
-use Google\Cloud\BigQuery\QueryJobConfiguration;
-use Google\Cloud\Core\ExponentialBackoff;
+use Exception;
+use RuntimeException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
+use Google\Cloud\BigQuery\QueryResults;
+use Google\Cloud\BigQuery\BigQueryClient;
+use Google\Cloud\Core\ExponentialBackoff;
 use googlogmob\BigQuery\Cache\CacheItemPool;
+use Google\Cloud\BigQuery\QueryJobConfiguration;
 
 /**
  * Class BigQuery.
@@ -16,87 +21,87 @@ use googlogmob\BigQuery\Cache\CacheItemPool;
 class BigQuery
 {
     /**
-     * @param string|null $project_id
+     * Creates and configures a BigQueryClient instance based on provided or default project settings.
      *
-     * @return BigQueryClient
+     * @param string|null $project_id Optional project ID. If null, empty, or '0', defaults to the project ID from the configuration.
+     * @return BigQueryClient A configured instance of the BigQueryClient.
      */
-    public function makeClient(string $project_id = null)
+    public function makeClient(?string $project_id = null): BigQueryClient
     {
         $bigQueryConfig = config('bigquery');
-        $project_id = empty($project_id) ? $bigQueryConfig['project_id'] : $project_id;
+        $project_id = $project_id === null || $project_id === '' || $project_id === '0' ? $bigQueryConfig['project_id'] : $project_id;
 
         $store = Cache::store($bigQueryConfig['auth_cache_store']);
         $cache = new CacheItemPool($store);
 
         $clientConfig = array_merge([
-            'projectId'   => $project_id,
+            'projectId' => $project_id,
             'keyFilePath' => $bigQueryConfig['application_credentials'],
-            'authCache'   => $cache,
+            'authCache' => $cache,
         ], Arr::get($bigQueryConfig, 'client_options', []));
 
         return new BigQueryClient($clientConfig);
     }
 
     /**
-     * @param Collection $data
+     * Prepares and transforms the provided collection by mapping each item into an array format.
+     *
+     * @param Collection $data The collection of items to be transformed.
+     * @return void
      */
     public function prepareData(Collection $data): void
     {
-        $data->transform(function ($item) {
-            return [
-                'data' => $item,
-            ];
-        });
+        $data->transform(static fn ($item): array => [
+            'data' => $item,
+        ]);
     }
 
     /**
-     * @param string      $dataset
-     * @param string      $table
-     * @param string|null $project_id
+     * Truncates all data from the specified table within the given dataset.
      *
-     * @return bool
+     * @param string $dataset The name of the dataset containing the table to truncate.
+     * @param string $table The name of the table to truncate.
+     * @param string|null $project_id Optional project ID to use for the operation. Defaults to the current project if not provided.
+     * @return bool Returns true if the truncation query completes successfully, otherwise false.
+     * @throws Exception
      */
-    public function truncate(string $dataset, string $table, string $project_id = null)
+    public function truncate(string $dataset, string $table, ?string $project_id = null): bool
     {
         $client = $this->makeClient($project_id);
-        $query = $client->query("DELETE FROM $dataset.$table WHERE 1=1");
+        $query = $client->query(sprintf('DELETE FROM %s.%s WHERE 1=1', $dataset, $table));
 
         return $this->runQuery($query, $client)->isComplete();
     }
 
     /**
-     * @param array $data
+     * Processes the provided data to extract and map rows based on the defined schema fields.
      *
-     * @return array
+     * @param array $data The input data containing a 'schema' with defined fields and 'rows' to process.
+     * @return array An array of processed rows where each row is mapped with field names as keys and corresponding values.
      */
-    public function handleSelectResult(array $data)
+    public function handleSelectResult(array $data): array
     {
         if (!Arr::get($data, 'rows', false)) {
             return [];
         }
 
-        $fields = collect($data['schema']['fields'])->map(function ($item) {
-            return $item['name'];
-        })->toArray();
+        $fields = collect($data['schema']['fields'])->map(fn ($item) => $item['name'])->toArray();
 
         return collect($data['rows'])
-            ->map(function ($item) use ($fields) {
-                return collect($item['f'])->mapWithKeys(function ($item, $k) use ($fields) {
-                    return [$fields[$k] => $item['v']];
-                });
-            })->toArray();
+            ->map(fn ($item) => collect($item['f'])->mapWithKeys(fn ($item, $k) => [$fields[$k] => $item['v']]))->toArray();
     }
 
     /**
-     * @param QueryJobConfiguration $query
-     * @param BigQueryClient        $client
-     * @param int                   $try
+     * Executes a BigQuery query with retry logic and waits for query completion.
      *
-     * @throws \Exception
+     * @param QueryJobConfiguration $query The query job configuration to be executed.
+     * @param BigQueryClient $client The BigQuery client instance used to run the query.
+     * @param int $try The number of retry attempts in case of retryable errors (default is 5).
+     * @return QueryResults The results of the query execution.
      *
-     * @return \Google\Cloud\BigQuery\QueryResults
+     * @throws Exception If the query fails after maximum retries or encounters a non-retryable error.
      */
-    public function runQuery(QueryJobConfiguration $query, BigQueryClient $client, int $try = 5)
+    public function runQuery(QueryJobConfiguration $query, BigQueryClient $client, int $try = 5): QueryResults
     {
         try {
             $qr = $client->runQuery($query);
@@ -111,8 +116,8 @@ class BigQuery
             }
 
             return $qr;
-        } catch (\Exception $e) {
-            if ($try <= 0 || $e->getCode() != 403) {
+        } catch (Exception $e) {
+            if ($try <= 0 || $e->getCode() !== 403) {
                 throw $e;
             }
             sleep(config('bigquery.sleep_time_403', 10));
@@ -122,32 +127,30 @@ class BigQuery
     }
 
     /**
-     * @param string      $file
-     * @param string      $table
-     * @param array       $fields
-     * @param string|null $dataset
-     * @param null        $project_id
+     * Saves data from a specified CSV file into a BigQuery table based on the provided schema fields.
      *
-     * @throws \Exception
+     * @param string $file The path to the CSV file to be imported.
+     * @param string $table The name of the BigQuery table where the data will be saved.
+     * @param array $fields The list of field names to map between the CSV file and the BigQuery table schema.
+     * @param string|null $dataset The BigQuery dataset name. If not provided, the value will be derived from the environment configuration.
+     * @param string|null $project_id The Google Cloud project ID. If null, the client's default project ID will be used.
+     * @return void
+     * @throws Exception
      */
-    public function saveFromFile(string $file, string $table, array $fields, string $dataset = null, $project_id = null)
+    public function saveFromFile(string $file, string $table, array $fields, ?string $dataset = null, ?string $project_id = null): void
     {
-        $dataset = $dataset ?? env('GOOGLE_CLOUD_DATASET');
+        $dataset ??= env('GOOGLE_CLOUD_DATASET');
         $client = $this->makeClient($project_id);
         $tableInfo = $client->dataset($dataset)->table($table)->info();
         $tableFields = collect($tableInfo['schema']['fields']);
 
         $schema = [
-            'fields' => collect($fields)->map(function ($k) use ($tableFields) {
-                return $tableFields->first(function ($field) use ($k) {
-                    return strtolower($field['name']) == strtolower($k);
-                });
-            })->values()->toArray(),
+            'fields' => collect($fields)->map(fn ($k) => $tableFields->first(fn ($field): bool => mb_strtolower((string)$field['name']) === mb_strtolower((string)$k)))->values()->toArray(),
         ];
 
         $tableBq = $client->dataset($dataset)->table($table);
 
-        $loadConfig = $tableBq->load(fopen($file, 'r'))
+        $loadConfig = $tableBq->load(fopen($file, 'rb'))
             ->sourceFormat('CSV')
             ->fieldDelimiter(';')
             ->schema($schema);
@@ -155,16 +158,15 @@ class BigQuery
 
         $backoff = new ExponentialBackoff(10);
 
-        $backoff->execute(function () use ($job) {
-            //printf('Waiting for job to complete' . PHP_EOL);
+        $backoff->execute(function () use ($job): void {
             $job->reload();
-            if (!$job->isComplete()) {
-                throw new \Exception('Job has not yet completed', 500);
+            if ($job->isComplete() === false) {
+                throw new RuntimeException('Job has not yet completed', 500);
             }
         });
 
         if (isset($job->info()['status']['errorResult'])) {
-            throw new \Exception('Error during saving to BQ'.PHP_EOL.print_r($job->info(), 1));
+            throw new RuntimeException(sprintf('Error during saving to BQ %s %s', PHP_EOL, print_r($job->info(), true)));
         }
     }
 }

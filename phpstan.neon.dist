@@ -1,0 +1,18 @@
+parameters:
+    tmpDir: /var/www/tmp
+    editorUrl: 'anything'
+    paths:
+        - src/
+    level: 5
+    reportUnmatchedIgnoredErrors: false
+    treatPhpDocTypesAsCertain: false
+
+    ignoreErrors:
+        - '#getResource\(\) should return#'
+        - '#getParentResource\(\) should return#'
+        - '#when\(\) expects#'
+        - '#Function config not found#'
+        - '#Function config_path not found#'
+        - '#Function array_get not found#'
+    excludePaths:
+        - vendor/

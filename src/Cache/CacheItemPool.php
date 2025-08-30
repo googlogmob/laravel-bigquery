@@ -1,36 +1,41 @@
 <?php
 
+declare(strict_types=1);
+
 namespace googlogmob\BigQuery\Cache;
 
-use DateTimeImmutable;
 use Exception;
+use DateTimeImmutable;
+use DateTimeInterface;
+use Psr\Cache\CacheItemInterface;
+use Illuminate\Contracts\Cache\Store;
+use Psr\Cache\CacheItemPoolInterface;
 use Illuminate\Contracts\Cache\Repository;
 use googlogmob\BigQuery\Exceptions\InvalidArgumentException;
-use Psr\Cache\CacheItemInterface;
-use Psr\Cache\CacheItemPoolInterface;
 
 class CacheItemPool implements CacheItemPoolInterface
 {
-    /**
-     * @var \Illuminate\Contracts\Cache\Repository
-     */
-    private $repository;
+    private const string INVALID_KEY_PATTERN = '#[{}\(\)/\\\\@:]#';
 
     /**
-     * @var \Psr\Cache\CacheItemInterface[]
+     * @var CacheItemInterface[]
      */
-    private $deferred = [];
+    private array $deferred = [];
 
     /**
-     * @param \Illuminate\Contracts\Cache\Repository $repository
+     * Constructor method for initializing the class with a Repository instance.
+     *
+     * @param Repository $repository The repository instance to be used by the class.
+     * @return void
      */
-    public function __construct(Repository $repository)
+    public function __construct(private readonly Repository $repository)
     {
-        $this->repository = $repository;
     }
 
     /**
-     * Destructor.
+     * Performs necessary cleanup operations before the object is destroyed.
+     *
+     * @return void
      */
     public function __destruct()
     {
@@ -38,35 +43,47 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Retrieves a cache item by its unique key.
+     *
+     * @param string $key The unique key of the cache item to retrieve.
+     * @return CacheItemInterface The cache item associated with the specified key.
+     * @throws \Psr\Cache\InvalidArgumentException|\Psr\SimpleCache\InvalidArgumentException
      */
-    public function getItem($key)
+    public function getItem(string $key): CacheItemInterface
     {
         $this->validateKey($key);
 
         if (isset($this->deferred[$key])) {
             return clone($this->deferred[$key]);
-        } elseif ($this->repository->has($key)) {
-            return new CacheItem($key, unserialize($this->repository->get($key)), true);
-        } else {
-            return new CacheItem($key);
         }
+
+        if ($this->repository->has($key)) {
+            return new CacheItem($key, unserialize($this->repository->get($key), []), true);
+        }
+
+        return new CacheItem($key);
     }
 
     /**
-     * {@inheritdoc}
+     * Retrieves multiple cache items by their unique keys.
+     *
+     * @param array $keys An array of unique keys for the cache items to retrieve.
+     * @return iterable An iterable collection of cache items, keyed by the specified keys.
+     * @throws \Psr\Cache\InvalidArgumentException|\Psr\SimpleCache\InvalidArgumentException
      */
-    public function getItems(array $keys = array())
+    public function getItems(array $keys = []): iterable
     {
-        return array_combine($keys, array_map(function($key) {
-            return $this->getItem($key);
-        }, $keys));
+        return array_combine($keys, array_map(fn (string $key): CacheItemInterface => $this->getItem($key), $keys));
     }
 
     /**
-     * {@inheritdoc}
+     * Checks if a cache item exists in the cache pool.
+     *
+     * @param string $key The unique key of the cache item to check.
+     * @return bool True if the cache item exists, false otherwise.
+     * @throws \Psr\Cache\InvalidArgumentException|\Psr\SimpleCache\InvalidArgumentException
      */
-    public function hasItem($key)
+    public function hasItem(string $key): bool
     {
         $this->validateKey($key);
 
@@ -85,16 +102,18 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Clears all items from the cache.
+     *
+     * @return bool True if the cache was successfully cleared, false otherwise.
      */
-    public function clear()
+    public function clear(): bool
     {
         try {
             $this->deferred = [];
             $store = $this->repository;
-            /* @var \Illuminate\Contracts\Cache\Store $store */
+            /* @var Store $store */
             $store->flush();
-        } catch (Exception $exception) {
+        } catch (Exception) {
             return false;
         }
 
@@ -102,9 +121,13 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Deletes a cache item by its unique key.
+     *
+     * @param string $key The unique key of the cache item to delete.
+     * @return bool True if the cache item was successfully deleted or does not exist; false otherwise.
+     * @throws \Psr\Cache\InvalidArgumentException
      */
-    public function deleteItem($key)
+    public function deleteItem(string $key): bool
     {
         $this->validateKey($key);
 
@@ -118,9 +141,13 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Deletes multiple cache items identified by their unique keys.
+     *
+     * @param array $keys An array of unique keys for the cache items to be deleted.
+     * @return bool True if all cache items were successfully deleted, false otherwise.
+     * @throws \Psr\Cache\InvalidArgumentException|\Psr\SimpleCache\InvalidArgumentException
      */
-    public function deleteItems(array $keys)
+    public function deleteItems(array $keys): bool
     {
         // Validating all keys first.
         foreach ($keys as $key) {
@@ -137,16 +164,19 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Saves a cache item to the repository storage.
+     *
+     * @param CacheItemInterface $item The cache item to be saved.
+     * @return bool True on successful save, false if the save operation fails or the item has expired.
      */
-    public function save(CacheItemInterface $item)
+    public function save(CacheItemInterface $item): bool
     {
         $expiresAt = $this->getExpiresAt($item);
 
         if (!$expiresAt) {
             try {
                 $this->repository->forever($item->getKey(), serialize($item->get()));
-            } catch (Exception $exception) {
+            } catch (Exception) {
                 return false;
             }
 
@@ -163,7 +193,7 @@ class CacheItemPool implements CacheItemPoolInterface
 
         try {
             $this->repository->put($item->getKey(), serialize($item->get()), $lifetime);
-        } catch (Exception $exception) {
+        } catch (Exception) {
             return false;
         }
 
@@ -171,9 +201,12 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Saves a cache item for deferred persistence.
+     *
+     * @param CacheItemInterface $item The cache item to save for deferred persistence.
+     * @return bool True if the item is successfully queued for deferred persistence, false otherwise.
      */
-    public function saveDeferred(CacheItemInterface $item)
+    public function saveDeferred(CacheItemInterface $item): bool
     {
         $expiresAt = $this->getExpiresAt($item);
 
@@ -181,7 +214,7 @@ class CacheItemPool implements CacheItemPoolInterface
             return false;
         }
 
-        $item = (new CacheItem($item->getKey(), $item->get(), true))->expiresAt($expiresAt);
+        $item = new CacheItem($item->getKey(), $item->get(), true)->expiresAt($expiresAt);
 
         $this->deferred[$item->getKey()] = $item;
 
@@ -189,13 +222,15 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * {@inheritdoc}
+     * Persists all deferred cache items to the storage.
+     *
+     * @return bool True if all deferred items were successfully saved, false otherwise.
      */
-    public function commit()
+    public function commit(): bool
     {
         $success = true;
 
-        foreach ($this->deferred as $key => $item) {
+        foreach ($this->deferred as $item) {
             $success = $success && $this->save($item);
         }
 
@@ -205,23 +240,26 @@ class CacheItemPool implements CacheItemPoolInterface
     }
 
     /**
-     * @param string $key
+     * Validates the given cache key to ensure it meets the requirements.
      *
-     * @throws \Psr\Cache\InvalidArgumentException
+     * @param string $key The cache key to validate.
+     * @return void
+     * @throws InvalidArgumentException If the key contains invalid characters.
      */
-    private function validateKey($key)
+    private function validateKey(string $key): void
     {
-        if (!is_string($key) || preg_match('#[{}\(\)/\\\\@:]#', $key)) {
-            throw new InvalidArgumentException();
+        if (preg_match(self::INVALID_KEY_PATTERN, $key)) {
+            throw new InvalidArgumentException(sprintf('Cache key "%s" contains invalid characters: {}()/\@: ', $key));
         }
     }
 
     /**
-     * @param CacheItem $item
+     * Retrieves the expiration date and time of a cache item.
      *
-     * @return \DateTimeInterface
+     * @param CacheItemInterface $item The cache item to retrieve the expiration date from.
+     * @return DateTimeInterface|null The expiration date and time if set, or null if no expiration is configured.
      */
-    private function getExpiresAt(CacheItem $item)
+    private function getExpiresAt(CacheItemInterface $item): ?DateTimeInterface
     {
         return $item->getExpiresAt();
     }
